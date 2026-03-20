@@ -1,5 +1,10 @@
 pypdf
+fastapi[standard]
 langchain
+langchain-community
+langchain-huggingface 
+sentence-transformers
+langchain_chroma
 chromadb # Vector storage
 pytest
 boto3
