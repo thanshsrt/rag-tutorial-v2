@@ -55,15 +55,24 @@ class HybridRequest(BaseModel):
 class PRReviewRequest(BaseModel):
     pr_url: str
     
-SYSTEM_PROMPT = """You are an expert Code Reviewer. You MUST follow this workflow EXACTLY.
+SYSTEM_PROMPT = """You are a Senior Software Architect performing a Code Review.
 
-Step 1: Call fetch_pr_diff.
-Step 2: Call internal_rag_search with a query about authentication, encoding, or headers.
-Step 3: ONLY after both tools return, write your review.
+INPUT PROVIDED:
+1. The PR Diff (The proposed changes)
+2. Internal Context (How we currently do things — may be empty or irrelevant)
 
-WARNING: If you write the review before calling internal_rag_search, your output will be incomplete and wrong. Do NOT synthesize until both tool results are in the conversation history.
+ABSOLUTE RULES:
+- NEVER invent code snippets, diff lines, or variable names that are not explicitly in the PR Diff or Internal Context provided above.
+- If the INTERNAL CODEBASE CONTEXT says "No matching internal patterns found" or is unrelated to the PR's language, IGNORE it. Review based solely on the PR diff.
+- Only compare against internal patterns if the internal files are clearly the SAME codebase or SAME language.
+- NEVER repeat the same title for multiple observations. Each observation must have a unique, specific title.
+- Provide exactly 3 technical observations.
+- For each observation, provide:
+  - TITLE: A unique, specific issue or praise.
+  - CONTEXT: Evidence from the provided diff only. Do not invent examples.
+  - ACTION: A clear instruction for the developer.
 
-After both results are present, write exactly 3 observations comparing the PR against internal patterns. Cite internal files by name."""
+Be brief, direct, and omit conversational filler."""
 
 async def generate_stream(question: str):
     """Convert the synchronous generator to an async generator for FastAPI."""
@@ -138,16 +147,11 @@ async def retrieve_hybrid(
     
 @app.post("/review-pr")
 async def review_pr_endpoint(request: PRReviewRequest):
-    """
-    Fat Server Endpoint: Runs the LangGraph agent to review a PR.
-    """
-    print(f"🚀 Starting Server-Side PR Review for: {request.pr_url}")
-    
     async def stream_generator():
         start_time = time.time()
         
-        # 🩹 CRITICAL: Yield immediately so client knows connection is alive
-        yield "data: [Connected. Compiling review...]\n\n"
+        # Immediate heartbeat so client knows connection is alive
+        yield "data: [Connected. Analyzing PR...]\n\n"
         await asyncio.sleep(0.01)
         
         initial_state = {
@@ -156,23 +160,19 @@ async def review_pr_endpoint(request: PRReviewRequest):
                 HumanMessage(content=f"Review this PR: {request.pr_url.strip()}")
             ]
         }
-
+        
         try:
-            node_count = 0
-            # astream keeps the connection alive
             async for event in agent_app.astream(initial_state, config={"recursion_limit": 10}):
-                node_count += 1
-                
                 for node_name, node_state in event.items():
                     elapsed = time.time() - start_time
                     
                     if "messages" in node_state:
                         last_msg = node_state["messages"][-1]
                         
-                        # Detect if this is the final answer (no more tool calls)
+                        # Final answer comes from the "review" node
                         is_final = (
-                            node_name == "agent" 
-                            and not getattr(last_msg, "tool_calls", None)
+                            node_name == "review"
+                            and hasattr(last_msg, "content")
                             and getattr(last_msg, "content", None)
                         )
                         
@@ -182,7 +182,6 @@ async def review_pr_endpoint(request: PRReviewRequest):
                         else:
                             yield f"data: [Status: {node_name} running... ({elapsed:.1f}s)]\n\n"
                 
-                # Force flush to client
                 await asyncio.sleep(0.05)
                 
         except Exception as e:
@@ -191,7 +190,7 @@ async def review_pr_endpoint(request: PRReviewRequest):
             yield f"data: [SERVER ERROR: {err}]\n\n"
 
     return StreamingResponse(
-        stream_generator(), 
+        stream_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
     )
