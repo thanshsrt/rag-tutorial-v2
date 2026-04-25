@@ -2,6 +2,7 @@ import argparse
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.llms.ollama import Ollama
+from langchain_ollama import ChatOllama
 
 from get_embedding_function import get_embedding_function
 import time
@@ -26,14 +27,17 @@ EMBEDDING_FUNCTION = get_embedding_function()
 DB = Chroma(persist_directory=CHROMA_PATH, embedding_function=EMBEDDING_FUNCTION)
 # MODEL = Ollama(model="mistral")
 # MODEL = Ollama(model="qwen2.5:3b")
-MODEL = Ollama(model="phi3:mini")
-
+# MODEL = Ollama(model="phi3:mini")
+# MODEL = Ollama(model="gemma4:4b")
+MODEL = Ollama(model="llama3.2:3b")
+CHAT_MODEL = ChatOllama(model="llama3.2:3b", temperature=0.1)
 print(f"✅ Initialization complete in {time.time() - _init_start:.2f}s")
 
 # Warm up model with dummy call
 print("🔥 Warming up LLM...")
 _warmup_start = time.time()
 _ = MODEL.invoke("Hi")  # Force model load into VRAM
+_ = CHAT_MODEL.invoke("Hi")
 print(f"✅ Warmup complete in {time.time() - _warmup_start:.2f}s")
 
 def main():
@@ -115,8 +119,39 @@ def query_rag_stream(query_text: str):
     except StopIteration:
         print("⚠️  No response from model")
         
-def get_db():
-    return DB
+def query_rag_with_metadata(query_text: str):
+    """Enhanced version with raw_chunks and confidence for agents."""
+    # retrieval
+    results = DB.similarity_search_with_score(query_text, k=5)
+    
+    # calculate confidence (average similarity score)
+    avg_score = sum(score for _,score in results) / len(results) if results else 0
+    
+    # build context
+    context_text = "\n\n---\n\n".join([doc.page_content for doc, _ in results])
+    
+    raw_chunks = [
+        {
+            "content": doc.page_content[:500],  # Truncate for size
+            "score": float(score),
+            "file": doc.metadata.get("id", "unknown")
+        }
+        for doc, score in results
+    ]
+    
+    # Generate answer
+    prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+    prompt = prompt_template.format(context=context_text, question=query_text)
+    
+    response_text = MODEL.invoke(prompt)
+    
+    return {
+        "answer": response_text,
+        "sources": [doc.metadata.get("id") for doc, _ in results],
+        "raw_chunks": raw_chunks,
+        "confidence": round(avg_score, 2),
+        "query": query_text
+    }
 
 if __name__ == "__main__":
     main()

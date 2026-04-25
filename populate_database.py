@@ -1,7 +1,13 @@
 import argparse
 import os
 import shutil
-from langchain_community.document_loaders import PyPDFDirectoryLoader
+from pathlib import Path
+
+from langchain_community.document_loaders import (
+    PyPDFDirectoryLoader,
+    DirectoryLoader,
+    TextLoader
+)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from get_embedding_function import get_embedding_function
@@ -29,14 +35,53 @@ def main():
 
 
 def load_documents():
-    document_loader = PyPDFDirectoryLoader(DATA_PATH)
-    return document_loader.load()
-
+    """Load PDFs AND code files."""
+    all_documents = []
+    
+    # 1. Load PDFs
+    if any(f.endswith('.pdf') for f in os.listdir(DATA_PATH)):
+        print("📄 Loading PDFs...")
+        pdf_loader = PyPDFDirectoryLoader(DATA_PATH)
+        all_documents.extend(pdf_loader.load())
+        
+    # 2. Load Python files
+    py_path = os.path.join(DATA_PATH, "code")
+    if os.path.exists(py_path):
+        print("🐍 Loading Python files...")
+        # Use TextLoader for code files with proper encoding
+        code_loader = DirectoryLoader(
+            py_path,
+            glob="**/*.py",
+            loader_cls=TextLoader,
+            loader_kwargs={'encoding': 'utf-8'},
+            recursive=True
+        )
+        all_documents.extend(code_loader.load())
+        
+    # 3. Load other text files (markdown, etc.) (NEW)
+    for ext in ['*.md', '*.txt', '*.js', '*.ts', '*.json']:
+        try:
+            text_loader = DirectoryLoader(
+                DATA_PATH,
+                glob=f"**/{ext}",
+                loader_cls=TextLoader,
+                loader_kwargs={'encoding': 'utf-8'},
+                recursive=True
+            )
+            docs = text_loader.load()
+            if docs:
+                print(f"📄 Loaded {len(docs)} {ext} files")
+                all_documents.extend(docs)
+        except Exception as e:
+            print(f"⚠️  Could not load {ext}: {e}")
+    
+    print(f"📚 Total documents loaded: {len(all_documents)}")
+    return all_documents
 
 def split_documents(documents: list[Document]):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=80,
+        chunk_size=1000,
+        chunk_overlap=100,
         length_function=len,
         is_separator_regex=False,
     )
@@ -82,9 +127,16 @@ def calculate_chunk_ids(chunks):
 
     for chunk in chunks:
         source = chunk.metadata.get("source")
-        page = chunk.metadata.get("page")
-        current_page_id = f"{source}:{page}"
-
+        
+        # For PDFs: use page number
+        if 'page' in chunk.metadata:
+            page = chunk.metadata.get("page")
+            current_page_id = f"{source}:{page}"
+        else:
+            # For code files: use line number approximation
+            # or just file-based chunking
+            current_page_id = source
+            
         # If the page ID is the same as the last one, increment the index.
         if current_page_id == last_page_id:
             current_chunk_index += 1
