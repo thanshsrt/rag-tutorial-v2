@@ -1,0 +1,11 @@
+{
+  "name": "internal_rag_search",
+  "description": "Searches the local codebase for existing patterns to compare against a PR",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string"}
+    },
+    "required": ["query"]
+  }
+}

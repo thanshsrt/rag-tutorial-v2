@@ -149,8 +149,6 @@ async def retrieve_hybrid(
 async def review_pr_endpoint(request: PRReviewRequest):
     async def stream_generator():
         start_time = time.time()
-        
-        # Immediate heartbeat so client knows connection is alive
         yield "data: [Connected. Analyzing PR...]\n\n"
         await asyncio.sleep(0.01)
         
@@ -158,10 +156,15 @@ async def review_pr_endpoint(request: PRReviewRequest):
             "messages": [
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=f"Review this PR: {request.pr_url.strip()}")
-            ]
+            ],
+            "diff_text": None,
+            "rag_sources": None
         }
         
         try:
+            full_review = ""
+            eval_result = None
+            
             async for event in agent_app.astream(initial_state, config={"recursion_limit": 10}):
                 for node_name, node_state in event.items():
                     elapsed = time.time() - start_time
@@ -169,7 +172,6 @@ async def review_pr_endpoint(request: PRReviewRequest):
                     if "messages" in node_state:
                         last_msg = node_state["messages"][-1]
                         
-                        # Final answer comes from the "review" node
                         is_final = (
                             node_name == "review"
                             and hasattr(last_msg, "content")
@@ -179,6 +181,15 @@ async def review_pr_endpoint(request: PRReviewRequest):
                         if is_final:
                             safe = last_msg.content.replace("\n", " | ")
                             yield f"data: ✅ REVIEW COMPLETE ({elapsed:.1f}s): {safe}\n\n"
+                            
+                            if "evaluation" in node_state:
+                                eval_result = node_state["evaluation"]
+                                status_emoji = "✅" if eval_result["passed"] else "⚠️"
+                                yield f"data: {status_emoji} QUALITY: {eval_result['score']}/10 | Passed: {eval_result['passed']}\n\n"
+                                
+                                # NEW: Warn if domain mismatch
+                                if eval_result["metrics"].get("domain_mismatch"):
+                                    yield f"data: ⚠️ WARNING: Review claims internal comparison but no matching patterns found. Treat with skepticism.\n\n"
                         else:
                             yield f"data: [Status: {node_name} running... ({elapsed:.1f}s)]\n\n"
                 
@@ -194,6 +205,11 @@ async def review_pr_endpoint(request: PRReviewRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
     )
+    
+@app.post("/query-enriched")
+async def query_enriched_endpoint(request: QueryRequest):
+    """Returns answer + raw_chunks + confidence for agent consumption."""
+    return query_rag_with_metadata(request.question)
 
 @app.get("/health")
 async def health():
